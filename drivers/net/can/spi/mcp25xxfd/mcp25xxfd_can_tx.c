@@ -23,6 +23,10 @@
 #include "mcp25xxfd_cmd.h"
 #include "mcp25xxfd_regs.h"
 
+static int
+mcp25xxfd_can_tx_handle_int_tefif_optimized(struct mcp25xxfd_can_priv *cpriv,
+					    u32 finished) __maybe_unused;
+
 /* mostly bit manipulations to move between stages */
 static struct mcp25xxfd_tx_spi_message *
 mcp25xxfd_can_tx_queue_first_spi_message(struct mcp25xxfd_tx_spi_message_queue *
@@ -236,6 +240,13 @@ static
 int mcp25xxfd_can_tx_tef_read(struct mcp25xxfd_can_priv *cpriv,
 			      int start, int count)
 {
+	/* The read in this operation relies on the known sram interface. The
+	 * mcp25xxfd chip propagates the next TEF to be read in the CiTEFUA
+	 * register. To ensure the driver to be in sync with the chip TEF
+	 * handling, maybe it's better to read the current TEF address from the
+	 * chip, as only the TEF object at this address is safe to read. This
+	 * also prohibits the bulk read of multiple TEFs
+	 */
 	u32 tef_offset = start * cpriv->fifos.tef.size;
 	struct mcp25xxfd_can_obj_tef *tef =
 		(struct mcp25xxfd_can_obj_tef *)(cpriv->sram + tef_offset);
@@ -399,30 +410,16 @@ mcp25xxfd_can_tx_handle_int_tefif_optimized(struct mcp25xxfd_can_priv *cpriv,
 
 int mcp25xxfd_can_tx_handle_int_tefif(struct mcp25xxfd_can_priv *cpriv)
 {
-	unsigned long flags;
-	u32 finished;
-
 	if (!(cpriv->status.intf & MCP25XXFD_CAN_INT_TEFIF))
 		return 0;
 
 	MCP25XXFD_DEBUGFS_STATS_INCR(cpriv, int_tef_count);
 
-	spin_lock_irqsave(&cpriv->fifos.tx_queue->lock, flags);
-
-	/* compute finished fifos and clear them immediately */
-	finished = (cpriv->fifos.tx_queue->in_can_transfer ^
-		    cpriv->status.txreq) &
-		cpriv->fifos.tx_queue->in_can_transfer;
-
-	spin_unlock_irqrestore(&cpriv->fifos.tx_queue->lock, flags);
-
-	/* run in optimized mode if possible */
-	if (finished)
-		return mcp25xxfd_can_tx_handle_int_tefif_optimized(cpriv,
-								   finished);
-	/* otherwise play it safe */
-	netdev_warn(cpriv->can.dev,
-		    "Something is wrong - we got a TEF interrupt but we were not able to detect a finished fifo\n");
+	/* removed the previously introduced optimized TEF handling as under
+	 * some timing circumstances the driver internal TEF state get's out of
+	 * sync with the chip which leads to reading wrong TEFs - see
+	 * https://github.com/msperl/linux-rpi/issues/6 for explanation
+	 */
 	return mcp25xxfd_can_tx_handle_int_tefif_conservative(cpriv);
 }
 
