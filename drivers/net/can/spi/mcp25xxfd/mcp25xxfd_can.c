@@ -579,6 +579,9 @@ static int mcp25xxfd_can_stop(struct net_device *net)
 	/* shutdown the can controller */
 	mcp25xxfd_can_shutdown(cpriv);
 
+	/* reset can controller */
+	mcp25xxfd_cmd_reset(spi);
+
 	/* stop the clock */
 	mcp25xxfd_clock_stop(cpriv->priv, MCP25XXFD_CLK_USER_CAN);
 
