@@ -334,6 +334,11 @@ static void mcp25xxfd_can_int_handle_ivmif_tx(struct mcp25xxfd_can_priv *cpriv,
 static void mcp25xxfd_can_int_handle_ivmif_rx(struct mcp25xxfd_can_priv *cpriv,
 					      u32 *mask)
 {
+	/* NOTE: ESI flag does not set IVMIF so it's not handled here */
+	/* NOTE: TXBOERR flag is set on bus off recovery and not handled here as
+	 *			 invalid message
+	 */
+
 	/* check if it is really a known tx error */
 	if ((cpriv->bus.bdiag[1] &
 	     (MCP25XXFD_CAN_BDIAG1_DCRCERR |
@@ -341,7 +346,8 @@ static void mcp25xxfd_can_int_handle_ivmif_rx(struct mcp25xxfd_can_priv *cpriv,
 	      MCP25XXFD_CAN_BDIAG1_DFORMERR |
 	      MCP25XXFD_CAN_BDIAG1_NCRCERR |
 	      MCP25XXFD_CAN_BDIAG1_NSTUFERR |
-	      MCP25XXFD_CAN_BDIAG1_NFORMERR
+	      MCP25XXFD_CAN_BDIAG1_NFORMERR |
+	      MCP25XXFD_CAN_BDIAG1_DLCMM
 		     )) == 0)
 		return;
 
@@ -388,13 +394,20 @@ static void mcp25xxfd_can_int_handle_ivmif_rx(struct mcp25xxfd_can_priv *cpriv,
 		cpriv->can.dev->stats.rx_frame_errors++;
 		cpriv->error_frame.data[2] |= CAN_ERR_PROT_FORM;
 	}
+	if (cpriv->bus.bdiag[1] & MCP25XXFD_CAN_BDIAG1_DLCMM) {
+		/* RX-Frame with mismatch between DLC and payload size */
+		*mask |= MCP25XXFD_CAN_BDIAG1_DLCMM;
+		cpriv->can.dev->stats.rx_frame_errors++;
+		cpriv->error_frame.data[2] |= CAN_ERR_PROT_FORM;
+	}
 }
 
 static int mcp25xxfd_can_int_handle_ivmif(struct mcp25xxfd_can_priv *cpriv)
 {
 	struct spi_device *spi = cpriv->priv->spi;
-	u32 mask, bdiag1;
+	u32 mask, comp_mask, bdiag1;
 	int ret;
+	bool bdiag1_err_cond = false;
 
 	if (!(cpriv->status.intf & MCP25XXFD_CAN_INT_IVMIF))
 		return 0;
@@ -430,21 +443,41 @@ static int mcp25xxfd_can_int_handle_ivmif(struct mcp25xxfd_can_priv *cpriv)
 
 	/* clear flags if we have bits masked */
 	if (!mask) {
-		/* the unsupported case, where we are not
-		 * clearing any registers
+		/* we don't want the driver to fail in case IVMIF is set without
+		 * having checked/ignored RX/TX error flags present, but only
+		 * if currently unhandled error flags are set in the
+		 * corresponding fields in bdiag[1]
 		 */
-		dev_warn_once(&spi->dev,
-			      "found IVMIF situation not supported by driver - bdiag = [0x%08x, 0x%08x]",
-			      cpriv->bus.bdiag[0], cpriv->bus.bdiag[1]);
-		return -EINVAL;
+		comp_mask = ~((MCP25XXFD_CAN_BDIAG1_EFMSGCNT_MASK)
+				| (MCP25XXFD_CAN_BDIAG1_ESI)
+				| (MCP25XXFD_CAN_BDIAG1_TXBOERR));
+		if ((cpriv->bus.bdiag[1] & comp_mask) == 0) {
+			dev_warn_ratelimited(&spi->dev,
+					     "got IVMIF flag set w/o BDIAG bits - bdiag = [0x%08x, 0x%08x]",
+					     cpriv->bus.bdiag[0],
+					     cpriv->bus.bdiag[1]);
+			bdiag1_err_cond = true;
+		} else {
+			/* the unsupported case, where we are not
+			 * clearing any registers
+			 */
+			dev_warn_once(&spi->dev,
+				      "found IVMIF situation not supported by driver - bdiag = [0x%08x, 0x%08x]",
+				      cpriv->bus.bdiag[0],
+				      cpriv->bus.bdiag[1]);
+			return -EINVAL;
+		}
 	}
 
 	/* clear the bits in bdiag1 */
-	bdiag1 = cpriv->bus.bdiag[1] & (~mask);
-	/* and write it */
-	ret = mcp25xxfd_cmd_write_mask(spi, MCP25XXFD_CAN_BDIAG1, bdiag1, mask);
-	if (ret)
-		return ret;
+	if (!bdiag1_err_cond) {
+		bdiag1 = cpriv->bus.bdiag[1] & (~mask);
+		/* and write it */
+		ret = mcp25xxfd_cmd_write_mask(spi, MCP25XXFD_CAN_BDIAG1,
+					       bdiag1, mask);
+		if (ret)
+			return ret;
+	}
 
 	/* and clear the interrupt flag until we have received or transmited */
 	cpriv->status.intf &= ~(MCP25XXFD_CAN_INT_IVMIF);
