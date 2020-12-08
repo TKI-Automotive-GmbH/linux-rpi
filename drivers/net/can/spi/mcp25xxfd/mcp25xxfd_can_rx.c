@@ -25,11 +25,21 @@
 #include "mcp25xxfd_can_priv.h"
 #include "mcp25xxfd_can_rx.h"
 
+/* defines */
+#define SCALE_MULTIPLE_OF_FOUR(var)	(var += ((var % 4) > 0) \
+						? (4 - (var % 4)) \
+						: 0)
+
 /* module parameters */
 static unsigned int rx_prefetch_bytes = -1;
 module_param(rx_prefetch_bytes, uint, 0664);
 MODULE_PARM_DESC(rx_prefetch_bytes,
 		 "number of bytes to blindly prefetch when reading a rx-fifo");
+
+static bool message_ram_wordwise = true;
+module_param(message_ram_wordwise, bool, 0664);
+MODULE_PARM_DESC(message_ram_wordwise,
+		 "handle the message RAM read/write wordwise");
 
 static struct sk_buff *
 mcp25xxfd_can_rx_submit_normal_frame(struct mcp25xxfd_can_priv *cpriv,
@@ -148,12 +158,27 @@ static int mcp25xxfd_can_rx_read_frame(struct mcp25xxfd_can_priv *cpriv,
 		(struct mcp25xxfd_can_obj_rx *)(cpriv->sram + addr);
 	int dlc;
 	int len, ret;
+	int readsize_prefetch, readsize;
 
 	/* we read the header plus prefetch_bytes */
 	if (read) {
 		cpriv->stats.rx_single_reads++;
+
+		readsize_prefetch = sizeof(*rx) + prefetch_bytes;
+
+		if (message_ram_wordwise) {
+			SCALE_MULTIPLE_OF_FOUR(readsize_prefetch);
+
+			/* ensure not to overflow target buffer on read */
+			readsize_prefetch = min_t(int, readsize_prefetch,
+						  (net->mtu == CANFD_MTU)
+						  ? sizeof(*rx) + 64
+						  : sizeof(*rx) + 8);
+		}
+
 		ret = mcp25xxfd_cmd_readn(spi, MCP25XXFD_SRAM_ADDR(addr),
-					  rx, sizeof(*rx) + prefetch_bytes);
+					  rx, readsize_prefetch);
+
 		if (ret)
 			return ret;
 	}
@@ -169,19 +194,34 @@ static int mcp25xxfd_can_rx_read_frame(struct mcp25xxfd_can_priv *cpriv,
 	len = can_dlc2len(min_t(int, dlc, (net->mtu == CANFD_MTU) ? 15 : 8));
 
 	/* read the remaining data for canfd frames */
-	if (read && len > prefetch_bytes) {
+	if (read && len > (readsize_prefetch - sizeof(*rx))) {
 		/* update stats */
 		MCP25XXFD_DEBUGFS_STATS_INCR(cpriv,
 					     rx_reads_prefetched_too_few);
 		MCP25XXFD_DEBUGFS_STATS_ADD(cpriv,
 					    rx_reads_prefetched_too_few_bytes,
-					    len - prefetch_bytes);
+					    len - readsize_prefetch -
+						sizeof(*rx));
+
 		/* here the extra portion reading data after prefetch */
+		readsize = len - (readsize_prefetch - sizeof(*rx));
+
+		if (message_ram_wordwise) {
+			SCALE_MULTIPLE_OF_FOUR(readsize);
+
+			readsize = min_t(int, readsize,
+					 (net->mtu == CANFD_MTU)
+					 ? 64 + sizeof(*rx) - readsize_prefetch
+					 : 8 + sizeof(*rx) - readsize_prefetch);
+		}
+
 		ret = mcp25xxfd_cmd_readn(spi,
-					  MCP25XXFD_SRAM_ADDR(addr) +
-					  sizeof(*rx) + prefetch_bytes,
-					  &rx->data[prefetch_bytes],
-					  len - prefetch_bytes);
+					  MCP25XXFD_SRAM_ADDR(addr)
+						+ readsize_prefetch,
+					  &rx->data[readsize_prefetch
+						- sizeof(*rx)],
+					  readsize);
+
 		if (ret)
 			return ret;
 	}
