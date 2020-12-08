@@ -272,6 +272,15 @@ static int mcp25xxfd_can_fifo_clear(struct mcp25xxfd_can_priv *cpriv)
 	memset(&cpriv->fifos.tx, 0, sizeof(cpriv->fifos.tx));
 	memset(&cpriv->fifos.rx, 0, sizeof(cpriv->fifos.rx));
 
+	/* fix to avoid problems when stopping/starting interface due to
+	 * FIFO confusion - maybe not cleared structures
+	 */
+	memset(&cpriv->fifos.tef, 0, sizeof(cpriv->fifos.tef));
+	memset(&cpriv->fifos.submit_queue, 0,
+	       sizeof(cpriv->fifos.submit_queue));
+
+	cpriv->fifos.submit_queue_count = 0;
+
 	/* clear FIFO config */
 	ret = mcp25xxfd_can_fifo_clear_regs(cpriv, MCP25XXFD_CAN_FIFOCON(1),
 					    MCP25XXFD_CAN_FIFOCON(32));
