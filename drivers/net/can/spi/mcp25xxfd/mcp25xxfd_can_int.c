@@ -399,6 +399,13 @@ static int mcp25xxfd_can_int_handle_ivmif(struct mcp25xxfd_can_priv *cpriv)
 	if (!(cpriv->status.intf & MCP25XXFD_CAN_INT_IVMIF))
 		return 0;
 
+	/* I sometimes get IVMIF interrupts even though IVMIE is disabled
+	 * and no error flags are set in BDIAG1. So make sure that the interrupt
+	 * is enabled before continuing
+	 */
+	if (!(cpriv->status.intf & MCP25XXFD_CAN_INT_IVMIE))
+		return 0;
+
 	MCP25XXFD_DEBUGFS_STATS_INCR(cpriv, int_ivm_count);
 
 	/* if we have a systemerror as well,
@@ -440,10 +447,10 @@ static int mcp25xxfd_can_int_handle_ivmif(struct mcp25xxfd_can_priv *cpriv)
 		return ret;
 
 	/* and clear the interrupt flag until we have received or transmited */
-	cpriv->status.intf &= ~(MCP25XXFD_CAN_INT_IVMIE);
+	cpriv->status.intf &= ~(MCP25XXFD_CAN_INT_IVMIF);
 	return mcp25xxfd_cmd_write_mask(spi, MCP25XXFD_CAN_INT,
 					cpriv->status.intf,
-					MCP25XXFD_CAN_INT_IVMIE);
+					MCP25XXFD_CAN_INT_IVMIF);
 }
 
 static int mcp25xxfd_can_int_handle_cerrif(struct mcp25xxfd_can_priv *cpriv)
@@ -529,7 +536,6 @@ static int mcp25xxfd_can_int_error_handling(struct mcp25xxfd_can_priv *cpriv)
 
 	return 0;
 }
-
 
 static int mcp25xxfd_can_int_handle_status(struct mcp25xxfd_can_priv *cpriv)
 {
